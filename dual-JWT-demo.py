@@ -51,7 +51,7 @@ ENABLE_REDIS_REVOCATION_EXTENSION = (
 # TTL for RedisRevocationStore keys.
 #
 # revocation_cutoff is needed while at least one refresh token with
-# iat < cutoff is still alive.
+# iat <= cutoff is still alive.
 # Such a refresh has exp = iat + REFRESH_SLIDING_TTL
 #                            <= cutoff + REDIS_REVOCATION_STORE_TTL - 1.
 # Hence revocation_ttl = REDIS_REVOCATION_STORE_TTL + 1 (rounding headroom).
@@ -87,7 +87,7 @@ class RevocationStore(Protocol):
     """Session revocation store.
 
     Keeps the revocation_cutoff boundary: all refresh tokens
-    with iat < cutoff are considered revoked.
+    with iat <= cutoff are considered revoked.
     """
 
     def revoke_all(self, user_id: str, now: int) -> None:
@@ -123,25 +123,15 @@ class RedisRevocationStore:
         self._revocation_ttl_base = revocation_ttl_base
 
     def revoke_all(self, user_id: str, now: int) -> None:
-        # revocation_cutoff — the cutoff boundary.
-        # All refresh tokens with iat < cutoff are considered revoked.
+        # revocation_cutoff = now: a refresh token is revoked when iat <= cutoff.
+        # iat is whole seconds, so a token issued in the same second is revoked too.
         #
-        # +1: revoke everything up to the end of the current second
-        # (inclusive).
-        # iat in a JWT is an integer number of seconds (UTC).
-        # If cutoff = now, a refresh issued in that same second has
-        # iat == now. The check iat < cutoff gives false, and such a refresh
-        # is NOT rejected — that is a hole.
-        # +1 shifts the boundary: iat == now < now + 1 → true → rejected.
-        cutoff = now + 1
-
-        # revocation_ttl — TTL of the cutoff key.
         # +1 — rounding headroom (see the comment on REDIS_REVOCATION_STORE_TTL).
         revocation_ttl = self._revocation_ttl_base + 1
 
         self._client.set(
             USER_REVOCATION_CUTOFF_KEY.format(user_id=user_id),
-            cutoff,
+            now,
             ex=revocation_ttl,
         )
 
@@ -149,7 +139,7 @@ class RedisRevocationStore:
         cutoff = self._client.get(
             USER_REVOCATION_CUTOFF_KEY.format(user_id=user_id)
         )
-        return bool(cutoff) and iat < int(cutoff)
+        return bool(cutoff) and iat <= int(cutoff)
 
 
 def build_revocation_store() -> RevocationStore:
@@ -267,6 +257,7 @@ def decode_access(token: str) -> dict:
         options={
             "require": [
                 CLAIM_EXP, CLAIM_IAT, CLAIM_SUB, CLAIM_JTI, CLAIM_TYP,
+                CLAIM_ISS, CLAIM_AUD,
             ]
         },
     )
@@ -287,6 +278,7 @@ def decode_refresh(token: str) -> dict:
             "require": [
                 CLAIM_EXP, CLAIM_IAT, CLAIM_SUB,
                 CLAIM_JTI, CLAIM_SID, CLAIM_SESSION_EXPIRY, CLAIM_TYP,
+                CLAIM_ISS, CLAIM_AUD,
             ]
         },
     )
